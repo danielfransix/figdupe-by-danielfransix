@@ -322,17 +322,6 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // ── GET /pick-browser ──────────────────────────────────────────────────────
-  if (req.method === 'GET' && pathname === '/pick-browser') {
-    promptForBrowserAsync().then(picked => {
-      if (picked) saveBrowser(picked);
-      json(res, 200, { ok: true, path: picked || '' });
-    }).catch(err => {
-      json(res, 500, { ok: false, error: err.message });
-    });
-    return;
-  }
-
   // ── POST /capture ──────────────────────────────────────────────────────────
   if (req.method === 'POST' && pathname === '/capture') {
     let rawBody  = '';

@@ -341,12 +341,16 @@ async function captureWidth(ws, width) {
   const result = JSON.parse(jsonStr);
   if (!result.ok) throw new Error(`Walker error: ${result.error}`);
 
+  // 8. Capture raw HTML for html.to.design or other tools
+  const rawHtml = await evaluate(ws, 'document.documentElement.outerHTML');
+
   return {
     width,
     height: fullHeight,
     title:  result.title,
     url:    result.url,
     tree:   result.tree,
+    html:   rawHtml,
   };
 }
 

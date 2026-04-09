@@ -101,7 +101,7 @@ function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
 }
 
-const CONFIG_PATH = path.join(os.homedir(), '.figdupe.json');
+const CONFIG_PATH = path.join(__dirname, 'config.json');
 
 function getSavedBrowser() {
   try {
@@ -113,16 +113,39 @@ function getSavedBrowser() {
   return null;
 }
 
-function saveBrowser(browserPath) {
+function getSavedUserDataDir() {
+  try {
+    if (fs.existsSync(CONFIG_PATH)) {
+      const cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+      return cfg.userDataDir || null;
+    }
+  } catch (e) {}
+  return null;
+}
+
+function getSavedHeadless() {
+  try {
+    if (fs.existsSync(CONFIG_PATH)) {
+      const cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+      return cfg.headless !== undefined ? cfg.headless : false;
+    }
+  } catch (e) {}
+  return false;
+}
+
+function saveConfig(updates) {
   try {
     let cfg = {};
     if (fs.existsSync(CONFIG_PATH)) {
       try { cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); } catch (e) {}
     }
-    if (browserPath) cfg.browserPath = browserPath;
-    else delete cfg.browserPath;
+    Object.assign(cfg, updates);
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2));
   } catch (e) {}
+}
+
+function saveBrowser(browserPath) {
+  saveConfig({ browserPath });
 }
 
 function promptForBrowserAsync() {
@@ -215,21 +238,28 @@ async function ensureChrome(customPath) {
   // Force-kill any lingering headless instances holding our specific port
   killZombieChromes();
 
-  console.log(`[chrome] Launching headless: ${execPath}`);
+  const isHeadless = getSavedHeadless();
+  const defaultUserDataDir = path.join(__dirname, 'figdupe-profile');
+  const userDataDir = getSavedUserDataDir() || defaultUserDataDir;
+
+  console.log(`[chrome] Launching ${isHeadless ? 'headless' : 'live browser'}: ${execPath}`);
 
   const args = [
     `--remote-debugging-port=${DEBUG_PORT}`,
-    `--user-data-dir=${path.join(os.tmpdir(), 'figdupe-chrome-profile')}`,
+    `--user-data-dir=${userDataDir}`,
     '--no-first-run',
     '--no-default-browser-check',
-    '--disable-extensions',
-    '--disable-popup-blocking',
     '--disable-translate',
     '--disable-sync',
     '--no-sandbox',
-    '--headless=new',
     'about:blank',
   ];
+
+  if (isHeadless) {
+    args.push('--headless=new');
+    args.push('--disable-extensions');
+    args.push('--disable-popup-blocking');
+  }
 
   const proc = spawn(execPath, args, {
     detached:    true,
