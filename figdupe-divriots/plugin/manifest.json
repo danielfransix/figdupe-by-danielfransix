@@ -1,0 +1,13 @@
+{
+  "name": "figdupe",
+  "id": "figdupe-by-danielfransix-001",
+  "api": "1.0.0",
+  "main": "code.js",
+  "ui": "ui.html",
+  "editorType": ["figma"],
+  "networkAccess": {
+    "allowedDomains": ["https://fonts.googleapis.com", "https://fonts.gstatic.com"],
+    "reasoning": "figdupe loads Cal Sans from Google Fonts for the plugin UI",
+    "devAllowedDomains": ["http://localhost:7331", "ws://localhost:7331"]
+  }
+}

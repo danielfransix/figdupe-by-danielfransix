@@ -8,7 +8,6 @@ const http   = require('http');
 const crypto = require('crypto');
 
 const { DEBUG_PORT } = require('./chrome.js');
-const WALKER_SCRIPT  = require('./walker.js');
 
 // ─── HTTP helper ──────────────────────────────────────────────────────────────
 
@@ -315,119 +314,8 @@ async function captureWidth(ws, width) {
     mobile:            width < 768,
   });
 
-  // 3. Freeze all animations so elements snap to their final visible state.
-  //    Framer Motion (v4–v11) uses CSS custom properties (--motion-scale,
-  //    --motion-opacity, etc.) composed into a single inline transform string
-  //    like: transform: translateX(var(--motion-translateX)) scale(var(--motion-scale))
-  //    getBoundingClientRect() uses the COMPUTED matrix, so scale(0) via a CSS
-  //    variable still collapses the element to 0×0 even if we only check
-  //    el.style.transform for the literal "scale(0)" string.
-  //
-  //    Strategy:
-  //    a) Kill CSS animations/transitions via a style tag.
-  //    b) Fast-forward all WAAPI animations (finish()).
-  //    c) Reset Framer Motion CSS variables (--motion-*) to their "visible" values.
-  //    d) For anything that slipped through, read getComputedStyle().transform,
-  //       parse the matrix, and force transform:none on near-zero-scale elements.
-  await evaluate(ws, `(function() {
-    // ── a) Kill CSS animations / transitions ──────────────────────────────
-    if (!document.getElementById('__figdupe_snap')) {
-      var s = document.createElement('style');
-      s.id = '__figdupe_snap';
-      s.textContent = '*, *::before, *::after { animation-duration: 0.001ms !important; animation-delay: 0ms !important; transition-duration: 0.001ms !important; transition-delay: 0ms !important; }';
-      document.head.appendChild(s);
-    }
-
-    // ── b) Fast-forward Web Animations API ────────────────────────────────
-    try {
-      var anims = document.getAnimations ? document.getAnimations() : [];
-      for (var i = 0; i < anims.length; i++) {
-        try { anims[i].finish(); } catch (e) {}
-      }
-    } catch (e) {}
-
-    // ── c) Reset Framer Motion CSS variables + inline near-zero opacity ───
-    //   Framer Motion v4–v11 sets CSS vars on each animated element:
-    //     --motion-translateX/Y/Z, --motion-scale/X/Y, --motion-rotate,
-    //     --motion-opacity, --motion-skewX/Y
-    var MOTION_VARS = [
-      '--motion-scale', '--motion-scaleX', '--motion-scaleY',
-      '--motion-translateX', '--motion-translateY', '--motion-translateZ',
-      '--motion-rotate', '--motion-rotateX', '--motion-rotateY',
-      '--motion-skewX', '--motion-skewY',
-    ];
-    var TRANSLATE_VARS = new Set(['--motion-translateX','--motion-translateY','--motion-translateZ']);
-
-    var all = document.querySelectorAll('*');
-    for (var j = 0; j < all.length; j++) {
-      var el = all[j];
-
-      // Reset near-zero inline opacity
-      if (el.style.opacity !== '' && parseFloat(el.style.opacity) < 0.1) {
-        el.style.setProperty('opacity', '1', 'important');
-      }
-
-      // Reset Framer Motion CSS variables to "visible" defaults
-      for (var k = 0; k < MOTION_VARS.length; k++) {
-        var v = MOTION_VARS[k];
-        var val = el.style.getPropertyValue(v);
-        if (val === '') continue;
-        if (TRANSLATE_VARS.has(v)) {
-          // Only reset large offsets (slide-in initial positions)
-          if (Math.abs(parseFloat(val)) > 50) el.style.setProperty(v, '0px');
-        } else {
-          // Scale/rotate/skew: reset near-zero scales to 1, others to 0
-          var n = parseFloat(val);
-          if (v.indexOf('scale') !== -1 && Math.abs(n) < 0.1) {
-            el.style.setProperty(v, '1');
-          } else if (v.indexOf('rotate') !== -1 || v.indexOf('skew') !== -1) {
-            // leave unless obviously absurd
-          }
-        }
-      }
-
-      // Also reset --motion-opacity if near zero
-      var mop = el.style.getPropertyValue('--motion-opacity');
-      if (mop !== '' && parseFloat(mop) < 0.1) {
-        el.style.setProperty('--motion-opacity', '1');
-      }
-    }
-
-    // ── d) Computed-matrix sweep — catch anything CSS vars didn't cover ───
-    for (var j2 = 0; j2 < all.length; j2++) {
-      var el2 = all[j2];
-      var cs = window.getComputedStyle(el2);
-
-      // Computed opacity
-      if (parseFloat(cs.opacity) < 0.05) {
-        el2.style.setProperty('opacity', '1', 'important');
-      }
-
-      // Computed transform matrix
-      var t = cs.transform;
-      if (t && t !== 'none' && t !== 'matrix(1, 0, 0, 1, 0, 0)') {
-        var m = t.match(/^matrix\\(([^,]+),([^,]+),([^,]+),([^,]+),/);
-        if (m) {
-          var sx = parseFloat(m[1]); // scale X
-          var sy = parseFloat(m[4]); // scale Y
-          if (Math.abs(sx) < 0.1 || Math.abs(sy) < 0.1) {
-            el2.style.setProperty('transform', 'none', 'important');
-          }
-        }
-      }
-    }
-
-    // ── e) Block rAF so Framer Motion can't re-apply initial values ────────
-    // Framer Motion's frame loop runs via requestAnimationFrame. After we've
-    // snapped everything to its final state, prevent new rAF callbacks so
-    // Framer can't overwrite our resets in the next paint cycle.
-    window.requestAnimationFrame = function() { return 0; };
-    window.cancelAnimationFrame  = function() {};
-  })()`);
-
-  // Settle: let the browser reflow after animation reset.
-  // rAF is now blocked so Framer cannot re-apply initial transforms.
-  await sleep(500);
+  // 3. Short settle for responsive JS / CSS media queries
+  await sleep(400);
 
   // 4. Measure the real full-page height at this width
   const fullHeight = await getFullPageHeight(ws);
@@ -445,203 +333,17 @@ async function captureWidth(ws, width) {
   // 6. Another short wait for any layout reflow triggered by height change
   await sleep(200);
 
-  // 6b. Diagnostic — log why elements are being filtered, to debug low node counts
-  try {
-    const diag = await evaluate(ws, `(function() {
-      var all = document.querySelectorAll('body *');
-      var total = all.length, dispNone = 0, visHidden = 0, zeroRect = 0, zeroExamples = [];
-      for (var i = 0; i < all.length; i++) {
-        var el = all[i];
-        var cs = window.getComputedStyle(el);
-        if (cs.display === 'none') { dispNone++; continue; }
-        if (cs.visibility === 'hidden') { visHidden++; continue; }
-        var r = el.getBoundingClientRect();
-        if (r.width === 0 && r.height === 0) {
-          zeroRect++;
-          if (zeroExamples.length < 5) {
-            zeroExamples.push({
-              tag: el.tagName, id: el.id, cls: el.className.toString().slice(0,50),
-              transform: cs.transform, opacity: cs.opacity,
-              width: cs.width, height: cs.height,
-              position: cs.position,
-              overflow: cs.overflow,
-              clipPath: cs.clipPath,
-              left: cs.left, top: cs.top,
-              inlineStyle: el.getAttribute('style') ? el.getAttribute('style').slice(0,100) : '',
-              motionScale: el.style.getPropertyValue('--motion-scale') || '',
-            });
-          }
-        }
-      }
-      return JSON.stringify({ total, dispNone, visHidden, zeroRect, zeroExamples });
-    })()`);
-    if (diag) {
-      const d = JSON.parse(diag);
-      console.log(`  [cdp] DIAG: ${d.total} total | ${d.dispNone} display:none | ${d.visHidden} visibility:hidden | ${d.zeroRect} zero-rect`);
-      if (d.zeroExamples.length) {
-        console.log(`  [cdp] DIAG zero-rect examples:`);
-        d.zeroExamples.forEach(e => console.log(`    <${e.tag}> cls="${e.cls}"\n      w=${e.width} h=${e.height} pos=${e.position} overflow=${e.overflow} clip=${e.clipPath}\n      transform="${e.transform}" opacity=${e.opacity} --motion-scale="${e.motionScale}"\n      inline: ${e.inlineStyle}`));
-      }
-    }
-  } catch (e) {
-    console.warn(`  [cdp] DIAG failed: ${e.message}`);
-  }
-
-  // 7. Run the DOM walker
-  const jsonStr = await evaluate(ws, WALKER_SCRIPT);
-  if (typeof jsonStr !== 'string') throw new Error('Walker returned no value');
-
-  const result = JSON.parse(jsonStr);
-  if (!result.ok) throw new Error(`Walker error: ${result.error}`);
-
-  // 8. Capture component states (hover / focus / active / disabled) via CSS.forcePseudoState
-  let componentStates = [];
-  try {
-    componentStates = await captureComponentStates(ws);
-    if (componentStates.length) {
-      console.log(`  [cdp] width=${width}px  →  ${componentStates.length} component state(s) captured`);
-    }
-  } catch (e) {
-    console.warn(`  [cdp] Component state capture failed: ${e.message}`);
-  }
-
-  // 9. Capture raw HTML for html.to.design or other tools
+  // 7. Extract raw HTML
   const rawHtml = await evaluate(ws, 'document.documentElement.outerHTML');
+  const title = await evaluate(ws, 'document.title');
 
   return {
     width,
-    height:          fullHeight,
-    title:           result.title,
-    url:             result.url,
-    tree:            result.tree,
-    html:            rawHtml,
-    componentStates,
+    height: fullHeight,
+    title:  title,
+    url:    await evaluate(ws, 'location.href'),
+    html:   rawHtml,
   };
-}
-
-// ─── Component state capture ──────────────────────────────────────────────────
-// For each interactive element on the page, force CSS pseudo-states (hover,
-// focus, active, disabled) via Chrome DevTools Protocol CSS.forcePseudoState
-// and record the resulting computed styles so the converter can build variants.
-//
-// Returns: Array<{ rect, tag, states: { default?, hover?, focus?, active?, disabled? } }>
-
-const INTERACTIVE_SELECTOR =
-  'button, input, select, textarea, a[href], [role="button"], [role="tab"], [role="checkbox"], [role="radio"], [role="switch"], [role="menuitem"]';
-
-const CAPTURED_PROPS = [
-  'background-color', 'color', 'border-top-color', 'border-top-width',
-  'box-shadow', 'opacity', 'outline-color', 'outline-width',
-];
-
-async function captureComponentStates(ws) {
-  try {
-    await ws.send('DOM.enable');
-    await ws.send('CSS.enable');
-  } catch (_) {
-    return []; // domains may already be enabled or not supported
-  }
-
-  // 1. Find interactive elements and their viewport rects via JS
-  let elements;
-  try {
-    elements = await evaluate(ws, `(function() {
-      const sel = ${JSON.stringify(INTERACTIVE_SELECTOR)};
-      return Array.from(document.querySelectorAll(sel))
-        .map(function(el, i) {
-          var r = el.getBoundingClientRect();
-          var w = Math.round(r.width), h = Math.round(r.height);
-          if (w < 2 || h < 2) return null;
-          return {
-            index: i,
-            tag:   el.tagName.toLowerCase(),
-            rect:  { x: Math.round(r.left), y: Math.round(r.top), w: w, h: h },
-            disabled: !!(el.disabled || el.getAttribute('aria-disabled') === 'true'),
-          };
-        })
-        .filter(Boolean)
-        .slice(0, 60);
-    })()`);
-  } catch (_) {
-    return [];
-  }
-
-  if (!elements || !elements.length) return [];
-
-  // 2. Get CDP nodeIds for all matching elements via DOM.querySelectorAll
-  let nodeIds = [];
-  try {
-    const { root } = await ws.send('DOM.getDocument', { depth: 1 });
-    const result   = await ws.send('DOM.querySelectorAll', {
-      nodeId:   root.nodeId,
-      selector: INTERACTIVE_SELECTOR,
-    });
-    nodeIds = result.nodeIds || [];
-  } catch (_) {
-    return [];
-  }
-
-  const results = [];
-
-  for (const el of elements) {
-    const nodeId = nodeIds[el.index];
-    if (!nodeId) continue;
-
-    const entry = { rect: el.rect, tag: el.tag, states: {} };
-
-    // Helper: get computed styles for a set of CSS properties via CDP
-    async function getStyles() {
-      try {
-        const { computedStyle } = await ws.send('CSS.getComputedStyleForNode', { nodeId });
-        const out = {};
-        for (const { name, value } of computedStyle) {
-          const camel = name.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
-          if (CAPTURED_PROPS.includes(name)) out[camel] = value;
-        }
-        return out;
-      } catch (_) {
-        return null;
-      }
-    }
-
-    // Default state
-    entry.states.default = await getStyles();
-
-    // Forced pseudo-states
-    const pseudoStates = el.disabled
-      ? ['disabled']
-      : ['hover', 'focus', 'active'];
-
-    for (const state of pseudoStates) {
-      try {
-        await ws.send('CSS.forcePseudoState', { nodeId, forcedPseudoClasses: [state] });
-        await sleep(80); // let paint settle
-        const styles = await getStyles();
-        // Only record if something actually changed from default
-        if (styles && entry.states.default && didStylesChange(entry.states.default, styles)) {
-          entry.states[state] = styles;
-        }
-      } catch (_) {
-        // pseudo-state not applicable
-      } finally {
-        try { await ws.send('CSS.forcePseudoState', { nodeId, forcedPseudoClasses: [] }); } catch (_) {}
-      }
-    }
-
-    results.push(entry);
-  }
-
-  try { await ws.send('CSS.disable'); } catch (_) {}
-  try { await ws.send('DOM.disable'); } catch (_) {}
-
-  return results;
-}
-
-function didStylesChange(a, b) {
-  for (const key of Object.keys(b)) {
-    if (a[key] !== b[key]) return true;
-  }
-  return false;
 }
 
 // ─── Main capture function ────────────────────────────────────────────────────
@@ -683,9 +385,8 @@ async function capture(targetUrl, widths = [1440]) {
     await ws.send('Page.navigate', { url: targetUrl });
     await loadPromise;
 
-    // Extra settle for JS-rendered content (React, Vue, Next.js, Framer Motion, etc.)
-    // Framer Motion needs ~3s to complete its entrance animations before we freeze them.
-    await sleep(4000);
+    // Extra settle for JS-rendered content (React, Vue, Next.js, etc.)
+    await sleep(2000);
 
     // Capture each width: run walker directly and return the DOM tree
     const captures = [];

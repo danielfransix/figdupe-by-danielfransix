@@ -141,6 +141,27 @@ const WALKER_SCRIPT = `(function figdupeWalker() {
     return true;
   }
 
+  // Collect children of parentEl, "seeing through" display:contents wrappers.
+  // display:contents elements have no layout box (getBoundingClientRect returns 0x0)
+  // but their children render normally. We must not stop at them.
+  function collectChildren(parentEl, depth) {
+    const result = [];
+    for (const child of parentEl.children) {
+      if (SKIP_TAGS.has(child.tagName)) continue;
+      const cs = getStyles(child);
+      if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+      if (parseFloat(cs.opacity) === 0) continue;
+      if (cs.display === 'contents') {
+        // Transparent wrapper — pull its children up to this level
+        result.push(...collectChildren(child, depth));
+        continue;
+      }
+      const cn = captureNode(child, depth);
+      if (cn) result.push(cn);
+    }
+    return result;
+  }
+
   function captureNode(el, depth) {
     if (depth > MAX_DEPTH) return null;
     if (SKIP_TAGS.has(el.tagName)) return null;
@@ -149,8 +170,13 @@ const WALKER_SCRIPT = `(function figdupeWalker() {
     if (styles.display === 'none' || styles.visibility === 'hidden') return null;
     if (parseFloat(styles.opacity) === 0) return null;
 
-    const rect = getRect(el);
-    if (rect.w === 0 && rect.h === 0) return null;
+    // display:contents — no box, but don't filter: let collectChildren handle it.
+    // If we ever call captureNode directly on a display:contents element (e.g. root),
+    // fall through to children processing below.
+    const isContents = styles.display === 'contents';
+
+    const rect = isContents ? { x: 0, y: 0, w: 1, h: 1 } : getRect(el);
+    if (!isContents && rect.w === 0 && rect.h === 0) return null;
 
     const tag   = el.tagName.toLowerCase();
     const isImg = tag === 'img';
@@ -199,10 +225,8 @@ const WALKER_SCRIPT = `(function figdupeWalker() {
     };
 
     if (!isText && !isTextInBox && !isImg && !isSvg && el.children.length > 0) {
-      for (const child of el.children) {
-        const cn = captureNode(child, depth + 1);
-        if (cn) node.children.push(cn);
-      }
+      // collectChildren handles display:contents wrappers transparently
+      node.children = collectChildren(el, depth + 1);
       // Respect z-index stacking order (higher z-index rendered last = on top in Figma)
       node.children.sort((a, b) => {
         const za = parseInt(a.styles.zIndex, 10) || 0;

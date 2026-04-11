@@ -1,0 +1,17 @@
+{
+  "name": "plugin",
+  "version": "1.0.0",
+  "description": "",
+  "main": "code.js",
+  "scripts": {
+    "build": "esbuild src/code.js --bundle --target=es2017 --outfile=code.js && esbuild src/ui.js --bundle --target=es2017 --outfile=ui.js && node build-ui.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@divriots/c2d-sdk": "^1.0.2",
+    "esbuild": "^0.28.0"
+  }
+}

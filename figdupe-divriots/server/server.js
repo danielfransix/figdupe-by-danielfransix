@@ -20,7 +20,10 @@ const SYSTEM_PROMPT_PATH = path.join(__dirname, '..', 'prompts', 'system.md');
 
 const { ensureChrome, stopChrome, promptForBrowserAsync, getSavedBrowser, saveBrowser } = require('./chrome.js');
 const { capture }             = require('./cdp.js');
-const { convertAllCaptures }  = require('./convert.js');
+
+const configPath = path.join(__dirname, 'config.json');
+let config = {};
+try { config = require(configPath); } catch (e) { }
 
 const SERVER_PORT  = 7331;
 const STATIC_PORT  = 7332;
@@ -293,20 +296,9 @@ function json(res, code, data) {
   res.end(body);
 }
 
-function countNodes(node) {
-  if (!node) return 0;
-  return 1 + (node.children || []).reduce((s, c) => s + countNodes(c), 0);
-}
-
-function countFigmaNodes(tree) {
-  if (Array.isArray(tree)) return tree.reduce((s, n) => s + countFigmaNodes(n), 0);
-  if (!tree) return 0;
-  return 1 + countFigmaNodes(tree.children || []);
-}
-
 // ─── HTTP server ──────────────────────────────────────────────────────────────
 
-const MAX_BODY = 1024 * 1024; // 1 MB — guard against runaway payloads
+const MAX_BODY = 32 * 1024 * 1024; // 32 MB — raw HTML per page can be large
 
 const server = http.createServer((req, res) => {
   cors(res);
@@ -393,9 +385,8 @@ const server = http.createServer((req, res) => {
           }
 
           const data       = await capture(targetUrl, widths);
-          const totalNodes = data.captures.reduce((s, c) => s + countNodes(c.tree), 0);
 
-          log('ok', `Capture done     "${fileName}"  ${data.captures.length} viewport(s), ${totalNodes} nodes`);
+          log('ok', `Capture done     "${fileName}"  ${data.captures.length} viewport(s)`);
           return data;
         });
 
@@ -445,6 +436,9 @@ const server = http.createServer((req, res) => {
       catch { json(res, 400, { ok: false, error: 'Invalid JSON body' }); return; }
 
       const {
+        // Multi-URL format: urls is an array of strings (http URLs)
+        urls: urlsParam,
+        // Single-URL backwards-compat format
         type       = 'url',
         value      = '',
         widths     = [1440],
@@ -457,8 +451,21 @@ const server = http.createServer((req, res) => {
       if (fileKey) touchFile(fileKey, fileName);
       if (browserPath) saveBrowser(browserPath);
 
-      if (!value.trim()) {
-        json(res, 400, { ok: false, error: 'Missing value (URL or path)' });
+      // Normalise to array of { type, value } targets
+      let targets;
+      if (urlsParam && Array.isArray(urlsParam) && urlsParam.length > 0) {
+        targets = urlsParam.map(u => typeof u === 'string' ? { type: 'url', value: u } : u);
+      } else {
+        if (!value.trim()) {
+          json(res, 400, { ok: false, error: 'Missing value (URL or path). Pass "urls" array or "value" string.' });
+          return;
+        }
+        targets = [{ type, value }];
+      }
+
+      const API_KEY = config.api_key || process.env.C2D_API_KEY;
+      if (!API_KEY) {
+        json(res, 500, { ok: false, error: 'Missing code.to.design API key in config.json' });
         return;
       }
 
@@ -466,48 +473,73 @@ const server = http.createServer((req, res) => {
       if (queuePos > 0) log('info', `Build queued (position ${queuePos}) for "${fileName}"`);
 
       try {
-        // ── 1. Capture ──────────────────────────────────────────────────────
-        const captureData = await enqueueCapture(async () => {
-          log('info', `Build started    "${fileName}"  type=${type}  widths=${widths.join(', ')}px`);
-          log('dim',  `  target: ${value}`);
+        const pages = []; // { title, url, captures: [{ width, height }], nodeMap }
 
-          await ensureChrome(browserPath);
-          const targetUrl = await resolveTarget(type, value);
-          if (targetUrl !== value.trim()) log('dim', `  resolved: ${targetUrl}`);
+        for (let i = 0; i < targets.length; i++) {
+          const target = targets[i];
+          const label  = `[${i + 1}/${targets.length}]`;
 
-          const data       = await capture(targetUrl, widths);
-          const totalNodes = data.captures.reduce((s, c) => s + countNodes(c.tree), 0);
-          log('ok', `Build captured   "${fileName}"  ${data.captures.length} viewport(s), ${totalNodes} DOM nodes`);
-          return data;
-        });
+          // ── 1. Capture ────────────────────────────────────────────────────
+          const captureData = await enqueueCapture(async () => {
+            log('info', `Build ${label} capturing  "${fileName}"  widths=${widths.join(', ')}px`);
+            log('dim',  `  target: ${target.value}`);
 
-        // ── 2. Convert ──────────────────────────────────────────────────────
-        log('info', `Build converting "${fileName}"  → Figma node tree…`);
-        const componentStatesList = captureData.captures.map(c => c.componentStates || []);
-        const figmaTree = convertAllCaptures(captureData.captures, componentStatesList);
-        const totalFigmaNodes = countFigmaNodes(figmaTree);
-        log('ok', `Build converted  "${fileName}"  ${totalFigmaNodes} Figma nodes`);
+            await ensureChrome(browserPath);
+            const targetUrl = await resolveTarget(target.type, target.value);
+            if (targetUrl !== target.value.trim()) log('dim', `  resolved: ${targetUrl}`);
 
-        // ── 3. Push to Figma ────────────────────────────────────────────────
-        log('info', `Build pushing    "${fileName}"  → Figma plugin…`);
-        const nodeMap = await sendPluginCommand(
-          fileKey || null,
-          'create_node_tree',
-          { tree: figmaTree, parentId: parentId || null },
-          240000   // 4 min for large trees
-        );
-        log('ok', `Build complete   "${fileName}"  → nodes created in Figma`);
+            const data = await capture(targetUrl, widths);
+            log('ok', `Build ${label} captured   "${fileName}"  ${data.captures.length} viewport(s)`);
+            return data;
+          });
 
-        json(res, 200, {
-          ok:   true,
-          data: {
-            title:     captureData.title,
-            url:       captureData.url,
-            captures:  captureData.captures.map(c => ({ width: c.width, height: c.height })),
-            figmaTree,
+          // ── 2. Convert via code.to.design API + push to Figma (per viewport) ──
+          log('info', `Build ${label} converting "${fileName}"  → code.to.design API…`);
+
+          const nodeMap = {};
+          for (const cap of captureData.captures) {
+            const { html, url, width } = cap;
+
+            log('dim', `  fetching code.to.design for width ${width}px`);
+            const apiResponse = await fetch('https://api.to.design/html', {
+              method:  'POST',
+              headers: {
+                'Content-Type':  'application/json',
+                'Authorization': `Bearer ${API_KEY}`,
+              },
+              body: JSON.stringify({ html, url, format: 'plugin' }),
+            });
+
+            if (!apiResponse.ok) {
+              const errText = await apiResponse.text();
+              throw new Error(`code.to.design API error (${width}px): ${apiResponse.status} ${errText}`);
+            }
+
+            const c2dData   = await apiResponse.json();
+            const figmaTree = c2dData.model;
+            const images    = c2dData.images || [];
+
+            log('info', `Build ${label} pushing    "${fileName}" (${width}px)  → Figma plugin…`);
+            const resMap = await sendPluginCommand(
+              fileKey || null,
+              'create_c2d_tree',
+              { model: figmaTree, images, parentId: parentId || null },
+              240000 // 4 min for large trees
+            );
+            nodeMap[width] = resMap;
+          }
+
+          pages.push({
+            title:    captureData.title,
+            url:      captureData.url,
+            captures: captureData.captures.map(c => ({ width: c.width, height: c.height })),
             nodeMap,
-          },
-        });
+          });
+        }
+
+        log('ok', `Build complete   "${fileName}"  ${pages.length} page(s) → Figma`);
+
+        json(res, 200, { ok: true, data: { pages } });
 
       } catch (err) {
         log('error', `Build failed     "${fileName}"  ${err.message}`);
@@ -575,9 +607,7 @@ function sendPluginCommand(fileKey, command, params, timeoutMs = 120000) {
     };
 
     const resolvedKey = fileKey || [...wsPlugins.keys()][0];
-    // noCleanup: true tells the periodic sweep to leave this entry alone —
-    // sendPluginCommand manages its own timeout above.
-    wsPending.set(id, { sender: fakeSender, fileKey: resolvedKey, createdAt: Date.now(), noCleanup: true });
+    wsPending.set(id, { sender: fakeSender, fileKey: resolvedKey, createdAt: Date.now() });
     targetEntry.ws.send(JSON.stringify({ id, command, params }));
   });
 }
@@ -593,7 +623,6 @@ const WS_PENDING_TTL = 30000;
 setInterval(() => {
   const now = Date.now();
   for (const [id, entry] of wsPending) {
-    if (entry.noCleanup) continue; // sendPluginCommand manages its own timeout
     if (now - entry.createdAt > WS_PENDING_TTL) {
       if (entry.sender.readyState === WebSocket.OPEN) {
         entry.sender.send(JSON.stringify({ id, error: 'Request timed out — plugin did not respond in time.' }));

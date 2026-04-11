@@ -2,7 +2,9 @@
 // AI-command interface: the plugin receives commands from the AI via WebSocket
 // relay (through ui.html) and executes them against the Figma Plugin API.
 
-figma.showUI(__html__, { width: 440, height: 260, title: 'figdupe' });
+import { c2dToFigmaCanvas } from '@divriots/c2d-sdk';
+
+figma.showUI(__html__, { width: 440, height: 260, title: 'figdupe divriots' });
 
 figma.ui.postMessage({
   type:     'file_info',
@@ -84,17 +86,14 @@ async function handleCommand(command, params) {
     case 'create_node':
       return await createNode(params);
 
-    case 'create_node_tree':
-      return await createNodeTree(params);
+    case 'create_c2d_tree':
+      return await createC2DTree(params);
 
     case 'set_node_raw':
       return await setNodeRaw(params);
 
     case 'delete_node':
       return deleteNode(params.nodeId);
-
-    case 'create_component_set':
-      return await createComponentSet(params);
 
     default:
       throw new Error(`Unknown command: ${command}`);
@@ -359,15 +358,13 @@ async function applyNodeProps(node, props) {
 
 function instantiateNode(type) {
   switch (type) {
-    case 'FRAME':          return figma.createFrame();
-    case 'COMPONENT':      return figma.createComponent();
-    case 'RECTANGLE':      return figma.createRectangle();
-    case 'ELLIPSE':        return figma.createEllipse();
-    case 'LINE':           return figma.createLine();
-    case 'TEXT':           return figma.createText();
-    case 'VECTOR':         return figma.createVector();
-    // COMPONENT_SET is created via figma.combineAsVariants — not instantiated directly
-    case 'COMPONENT_SET':  return figma.createFrame(); // placeholder; replaced in createNodeTree
+    case 'FRAME':     return figma.createFrame();
+    case 'COMPONENT': return figma.createComponent();
+    case 'RECTANGLE': return figma.createRectangle();
+    case 'ELLIPSE':   return figma.createEllipse();
+    case 'LINE':      return figma.createLine();
+    case 'TEXT':      return figma.createText();
+    case 'VECTOR':    return figma.createVector();
     default: throw new Error(`Unsupported node type: ${type}`);
   }
 }
@@ -388,210 +385,34 @@ async function setNodeRaw({ nodeId, props = {} }) {
   return { ok: true, nodeId };
 }
 
-// Collect every unique font needed by TEXT nodes in the tree (depth-first).
-// Returns an array of { family, style } objects deduplicated by key.
-function collectFonts(def, seen = new Set(), out = []) {
-  if (!def) return out;
-  if (def.type === 'TEXT' || def.isText || def.isTextInBox) {
-    const fam   = (def.fontFamily || 'Inter').split(',')[0].replace(/['"]/g, '').trim();
-    const style = def.fontStyle || def.fontWeight || 'Regular';
-    const normalStyle = style === '400' || style === 'normal' ? 'Regular'
-                      : style === '700' || style === 'bold'   ? 'Bold'
-                      : style === '600'                       ? 'SemiBold'
-                      : style === '500'                       ? 'Medium'
-                      : style === '300'                       ? 'Light'
-                      : style === '100'                       ? 'Thin'
-                      : style === '200'                       ? 'ExtraLight'
-                      : style === '800'                       ? 'ExtraBold'
-                      : style === '900'                       ? 'Black'
-                      : String(style);
-    // Always add Inter Regular as the final fallback
-    for (const fn of [{ family: fam, style: normalStyle }, { family: 'Inter', style: 'Regular' }]) {
-      const k = `${fn.family}:${fn.style}`;
-      if (!seen.has(k)) { seen.add(k); out.push(fn); }
-    }
-  }
-  for (const child of (def.children || [])) {
-    collectFonts(child, seen, out);
-  }
-  return out;
-}
-
-async function createNodeTree({ tree, parentId }) {
+async function createC2DTree({ model, images, parentId }) {
   const parent = parentId ? figma.getNodeById(parentId) : figma.currentPage;
   if (!parent) throw new Error(`Parent ${parentId} not found`);
 
-  // Pre-load all fonts in parallel before building — avoids sequential loadFontAsync calls
-  const fontsNeeded = collectFonts(tree);
-  await Promise.all(fontsNeeded.map(fn =>
-    figma.loadFontAsync(fn).then(() => {
-      _loadedFonts.add(`${fn.family}:${fn.style}`);
-    }).catch(() => {}) // ignore missing fonts — ensureFontLoaded will fall back
-  ));
-
-  const idMap = {}; // name → id
-
-  async function build(def, parentNode) {
-    const type     = def.type;
-    const children = def.children || [];
-
-    // ── COMPONENT_SET: build each variant as a COMPONENT then combine ──────
-    if (type === 'COMPONENT_SET') {
-      return await buildComponentSet(def, parentNode);
-    }
-
-    const props = {};
-    for (const k of Object.keys(def)) {
-      if (k !== 'type' && k !== 'children') props[k] = def[k];
-    }
-
-    let node;
-    try {
-      node = instantiateNode(type);
-    } catch (e) {
-      console.warn(`[figdupe] Skipping unsupported node type "${type}": ${e.message}`);
-      return null;
-    }
-
-    if ('appendChild' in parentNode) parentNode.appendChild(node);
-
-    try {
-      await applyNodeProps(node, props);
-    } catch (e) {
-      console.warn(`[figdupe] applyNodeProps failed for "${props.name || type}": ${e.message}`);
-    }
-
-    if (props.name) idMap[props.name] = node.id;
-
-    for (const child of children) {
-      try {
-        await build(child, node);
-      } catch (e) {
-        console.warn(`[figdupe] Skipping child "${child.name || child.type}": ${e.message}`);
+  // We need to load all fonts used by the model before painting it, or let c2dToFigmaCanvas handle it
+  // c2dToFigmaCanvas automatically handles font loading and paints the scene node
+  // wait! We don't have binary images in the main thread yet. We need to tell the UI thread to convert them.
+  // Oh, wait, if we send `images` to UI thread, we can ask UI thread to convert it to binary first.
+  
+  // But wait, my server.js already sends `images` to the plugin over websocket via `ui.html` which forwards it to `code.js`.
+  // `ui.html` can do the `toBinary` conversion BEFORE sending it to `code.js`!
+  // Let's assume `images` is already an array of `BinaryImage`s, converted by `ui.html` before it reaches `code.js`.
+  
+  try {
+    const node = await c2dToFigmaCanvas(model, images, {
+      onWarning: w => console.warn('[figdupe] Import warning:', w)
+    });
+    if (node) {
+      if ('appendChild' in parent) {
+        parent.appendChild(node);
       }
+      return { id: node.id, name: node.name };
     }
-    return node;
+  } catch (err) {
+    throw new Error(`Failed to create C2D tree: ${err.message}`);
   }
-
-  // Build a COMPONENT_SET from a descriptor that has { variants: [...] }
-  async function buildComponentSet(def, parentNode) {
-    const { name, x = 0, y = 0, variants = [] } = def;
-    if (!variants.length) return null;
-
-    const components = [];
-
-    // Build each variant as a COMPONENT, temporarily parented to the page
-    // so combineAsVariants can reach them.
-    const stagingParent = figma.currentPage;
-
-    for (const varDef of variants) {
-      const varProps    = {};
-      const varChildren = varDef.children || [];
-      for (const k of Object.keys(varDef)) {
-        if (k !== 'type' && k !== 'children') varProps[k] = varDef[k];
-      }
-
-      const comp = figma.createComponent();
-      stagingParent.appendChild(comp);
-      try { await applyNodeProps(comp, varProps); } catch (e) {
-        console.warn(`[figdupe] variant props failed "${varProps.name}": ${e.message}`);
-      }
-
-      for (const child of varChildren) {
-        try { await build(child, comp); } catch (e) {
-          console.warn(`[figdupe] variant child skipped: ${e.message}`);
-        }
-      }
-
-      components.push(comp);
-    }
-
-    // Combine into a COMPONENT_SET on the page, then reparent to parentNode
-    let set;
-    try {
-      set = figma.combineAsVariants(components, stagingParent);
-      if (name) set.name = name;
-      set.x = x;
-      set.y = y;
-    } catch (e) {
-      console.warn(`[figdupe] combineAsVariants failed: ${e.message}`);
-      // Fall back: leave individual components in place
-      return null;
-    }
-
-    // Move the set to the intended parent if it differs from the page
-    if (parentNode !== stagingParent && 'appendChild' in parentNode) {
-      try { parentNode.appendChild(set); } catch (_) {}
-    }
-
-    if (name) idMap[name] = set.id;
-    return set;
-  }
-
-  const defs = Array.isArray(tree) ? tree : [tree];
-  for (const def of defs) {
-    await build(def, parent);
-  }
-
-  return idMap;
-}
-
-// ─── create_component_set command ────────────────────────────────────────────
-// Accepts { variants: [{ name, width, height, fills, children, ... }], name, parentId }
-// Each variant should be named using Figma's Property=Value convention e.g. "State=Hover"
-
-async function createComponentSet({ variants = [], name, parentId }) {
-  const parent = parentId ? figma.getNodeById(parentId) : figma.currentPage;
-  if (!parent) throw new Error(`Parent ${parentId} not found`);
-  if (!variants.length) throw new Error('variants array is empty');
-
-  const components = [];
-
-  for (const varDef of variants) {
-    const children = varDef.children || [];
-    const props    = {};
-    for (const k of Object.keys(varDef)) {
-      if (k !== 'children') props[k] = varDef[k];
-    }
-    const comp = figma.createComponent();
-    figma.currentPage.appendChild(comp); // must be on page for combineAsVariants
-    try { await applyNodeProps(comp, props); } catch (e) {
-      console.warn(`[figdupe] createComponentSet: variant props failed: ${e.message}`);
-    }
-    for (const childDef of children) {
-      try { await buildSingle(childDef, comp); } catch (e) {
-        console.warn(`[figdupe] createComponentSet: child failed: ${e.message}`);
-      }
-    }
-    components.push(comp);
-  }
-
-  const set = figma.combineAsVariants(components, figma.currentPage);
-  if (name) set.name = name;
-
-  if (parent !== figma.currentPage && 'appendChild' in parent) {
-    parent.appendChild(set);
-  }
-
-  return { id: set.id, name: set.name, type: set.type };
-}
-
-// Minimal single-node builder for use outside createNodeTree
-async function buildSingle(def, parentNode) {
-  const type     = def.type;
-  const children = def.children || [];
-  const props    = {};
-  for (const k of Object.keys(def)) {
-    if (k !== 'type' && k !== 'children') props[k] = def[k];
-  }
-  let node;
-  try { node = instantiateNode(type); } catch (_) { return null; }
-  if ('appendChild' in parentNode) parentNode.appendChild(node);
-  try { await applyNodeProps(node, props); } catch (_) {}
-  for (const child of children) {
-    try { await buildSingle(child, node); } catch (_) {}
-  }
-  return node;
+  
+  return { ok: false, error: "Failed to import" };
 }
 
 function deleteNode(nodeId) {

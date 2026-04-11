@@ -1,0 +1,8 @@
+node_modules/
+
+# Contains API keys and local machine paths — never commit
+figdupe-codebase/server/config.json
+figdupe-divriots/server/config.json
+
+# Chrome profile data
+figdupe-profile/

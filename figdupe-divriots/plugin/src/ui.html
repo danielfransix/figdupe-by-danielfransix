@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cal+Sans&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Cal Sans', sans-serif;
+      font-size: 13px;
+      background: #141414;
+      color: #c0c0c0;
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      overflow: hidden;
+    }
+
+    /* ── Status area ── */
+    .main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 18px 20px 12px;
+    }
+
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+      color: #e0e0e0;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #444;
+      flex-shrink: 0;
+      transition: background 0.3s;
+    }
+    .dot.connected  { background: #4ade80; }
+    .dot.connecting { background: #fb923c; animation: pulse 1.2s ease-in-out infinite; }
+    .dot.error      { background: #f87171; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.25; }
+    }
+
+    .sub {
+      font-size: 12px;
+      color: #4a4a4a;
+      letter-spacing: 0.01em;
+    }
+
+    /* ── Start instructions (shown when not connected) ── */
+    .hint {
+      display: none;
+      flex-direction: column;
+      gap: 0;
+      width: 100%;
+      padding: 0 20px 6px;
+    }
+    .hint.visible { display: flex; }
+
+    .hint-row {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      padding: 7px 0;
+      border-top: 1px solid #1e1e1e;
+    }
+    .hint-row:first-child { border-top: none; }
+
+    .hint-os {
+      font-size: 11px;
+      color: #3a3a3a;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      flex-shrink: 0;
+      width: 64px;
+    }
+    .hint-os.active { color: #888; }
+
+    .hint-action {
+      font-size: 11px;
+      color: #383838;
+      line-height: 1.4;
+    }
+    .hint-action.active { color: #c0c0c0; }
+    .hint-action code {
+      font-family: 'Cal Sans', monospace;
+      font-size: 11px;
+      background: #1e1e1e;
+      color: #888;
+      padding: 2px 6px;
+      border-radius: 3px;
+      letter-spacing: 0.02em;
+    }
+    .hint-action.active code { color: #bbb; }
+    .hint-action em { font-style: normal; color: #555; }
+
+    /* ── Author row ── */
+    .author-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 20px;
+      border-top: 1px solid #1e1e1e;
+      flex-shrink: 0;
+    }
+    .author-label {
+      font-size: 11px;
+      color: #3a3a3a;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+    .author-name  { font-size: 11px; color: #c0c0c0; }
+    .author-divider { color: #2a2a2a; font-size: 11px; margin: 0 2px; }
+
+    .footer-link {
+      font-size: 11px;
+      cursor: pointer;
+      color: rgba(255, 255, 255, 0.4);
+      transition: color 0.15s;
+    }
+    .footer-link:hover { color: #fff; }
+
+    /* ── Footer ── */
+    .footer {
+      border-top: 1px solid #1f1f1f;
+      padding: 0 20px;
+      height: 40px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+    .footer-brand   { font-size: 12px; color: #ffffff; letter-spacing: 0.04em; }
+    .footer-divider { color: #2a2a2a; font-size: 11px; margin: 0 2px; }
+  </style>
+</head>
+<body>
+
+  <!-- Status -->
+  <div class="main">
+    <div class="status">
+      <span class="dot connecting" id="dot"></span>
+      <span id="label">Connecting…</span>
+    </div>
+    <div class="sub" id="sub">Waiting for figdupe server…</div>
+  </div>
+
+  <!-- Start instructions (visible when not connected) -->
+  <div class="hint" id="hint">
+    <div class="hint-row" id="rowMac">
+      <span class="hint-os" id="osMac">Mac</span>
+      <span class="hint-action" id="actionMac">
+        Double-click <code>Start Figdupe.command</code> in Finder
+      </span>
+    </div>
+    <div class="hint-row" id="rowWin">
+      <span class="hint-os" id="osWin">Windows</span>
+      <span class="hint-action" id="actionWin">
+        Double-click <code>Start Figdupe.bat</code>
+      </span>
+    </div>
+    <div class="hint-row">
+      <span class="hint-os" style="color:#2a2a2a;">or</span>
+      <span class="hint-action" style="color:#2a2a2a;">
+        Open terminal <em>inside the figdupe folder</em>, run <code>node server/server.js</code>
+      </span>
+    </div>
+  </div>
+
+  <!-- Author -->
+  <div class="author-row">
+    <span class="author-label">Author:</span>
+    <span class="author-name">Daniel Fransix</span>
+    <span class="author-divider">|</span>
+    <span class="footer-link" id="xLink">x.com/danielfransix</span>
+  </div>
+
+  <!-- Footer -->
+  <div class="footer">
+    <span class="footer-brand">figdupe</span>
+    <span class="footer-divider">|</span>
+    <span class="footer-link" id="coffeeLink">☕ Buy me a coffee</span>
+  </div>
+
+  <script>
+    /* __UI_JS__ */
+  </script>
+</body>
+</html>
