@@ -22,8 +22,16 @@ const { ensureChrome, stopChrome, promptForBrowserAsync, getSavedBrowser, saveBr
 const { capture }             = require('./cdp.js');
 
 const configPath = path.join(__dirname, 'config.json');
+if (!fs.existsSync(configPath)) {
+  console.error('\n  [error] config.json not found.');
+  console.error('  Copy figdupe-divriots/server/config.example.json → config.json and fill in your values.\n');
+  process.exit(1);
+}
 let config = {};
-try { config = require(configPath); } catch (e) { }
+try { config = require(configPath); } catch (e) {
+  console.error('\n  [error] config.json is not valid JSON:', e.message, '\n');
+  process.exit(1);
+}
 
 const SERVER_PORT  = 7331;
 const STATIC_PORT  = 7332;

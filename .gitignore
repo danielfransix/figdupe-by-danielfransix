@@ -1,6 +1,7 @@
 node_modules/
 
-# Contains API keys and local machine paths — never commit
+# Contains API keys and local machine paths — never commit.
+# Copy config.example.json → config.json and fill in your values.
 figdupe-codebase/server/config.json
 figdupe-divriots/server/config.json
 
